@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "start": "node --import ./src/anchor-hook.mjs ./node_modules/tsx/dist/cli.mjs src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/split.test.ts src/winner.test.ts src/machines.test.ts src/packs-state.test.ts src/grade.test.ts"
   },
