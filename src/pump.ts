@@ -2,6 +2,7 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
@@ -22,7 +23,7 @@ import {
 } from "@pump-fun/pump-sdk";
 import { canonicalPumpPoolPda } from "@pump-fun/pump-swap-sdk";
 import { feeClaimPlan } from "./claim-plan.js";
-import { encodeTx, rpc, signAndSend } from "./chain.js";
+import { encodeTx, rpc, signAndSend, sleep } from "./chain.js";
 import { CARDS_MINT, tokenBalance } from "./jupiter.js";
 import { requireVault } from "./keys.js";
 
@@ -48,7 +49,6 @@ export const buildCreate = async (input: {
   name: string;
   symbol: string;
   uri: string;
-  quoteRaw?: bigint;
 }) => {
   const sdk = online();
   const resolved = await sdk.resolveQuoteMint(CARDS_MINT).catch(() => null);
@@ -67,45 +67,52 @@ export const buildCreate = async (input: {
     quoteTokenProgram,
     ...(pumpQuote ? { pumpQuote } : {}),
   });
-  const create = packTx({ user: input.user, mint: input.mint, blockhash, instructions: [createIx] });
-  if (!input.quoteRaw || input.quoteRaw <= 0n) return { create, buy: null };
+  return packTx({ user: input.user, mint: input.mint, blockhash, instructions: [createIx] });
+};
 
+export const buildBuy = async (input: { mint: PublicKey; user: PublicKey; quoteRaw: bigint }) => {
+  const sdk = online();
+  let curveInfo = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    curveInfo = await rpc().getAccountInfo(bondingCurvePda(input.mint));
+    if (curveInfo) break;
+    await sleep(400);
+  }
+  if (!curveInfo) throw new Error("The coin is not on chain yet. Sign the dev buy again in a moment.");
+  const bondingCurve = PUMP_SDK.decodeBondingCurve(curveInfo);
   const [global, feeConfig, quoteControl] = await Promise.all([
     sdk.fetchGlobal(),
     sdk.fetchFeeConfig(),
     sdk.fetchQuoteControl().catch(() => null),
   ]);
+  const resolved = await sdk.resolveQuoteMint(CARDS_MINT).catch(() => null);
   const quoteAmount = new BN(input.quoteRaw.toString());
   const amount = getBuyTokenAmountFromSolAmount({
     global,
     feeConfig,
-    mintSupply: null,
-    bondingCurve: null,
+    mintSupply: bondingCurve.tokenTotalSupply,
+    bondingCurve,
     amount: quoteAmount,
     quoteMint: CARDS_MINT,
     quoteControl,
     ...(resolved?.pumpQuote ? { pumpQuote: resolved.pumpQuote.curve } : {}),
   });
   if (amount.lten(0)) throw new Error("This dev buy is too small to buy the coin.");
-  const combined = await PUMP_SDK.createV2AndBuyV2Instructions({
+  const instructions = await PUMP_SDK.buyV2Instructions({
     global,
-    mint: input.mint.publicKey,
-    name: input.name,
-    symbol: input.symbol,
-    uri: input.uri,
-    creator: input.creator,
+    bondingCurveAccountInfo: curveInfo,
+    bondingCurve,
+    associatedUserAccountInfo: null,
+    mint: input.mint,
     user: input.user,
     amount,
     quoteAmount,
-    mayhemMode: false,
-    quoteMint: CARDS_MINT,
-    quoteTokenProgram,
-    ...(pumpQuote ? { pumpQuote } : {}),
+    slippage: 1,
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    quoteTokenProgram: resolved?.quoteTokenProgram || TOKEN_PROGRAM_ID,
   });
-  const buyIxs = combined.slice(1);
-  if (!buyIxs.length) throw new Error("The dev buy could not be built.");
-  const buy = packTx({ user: input.user, blockhash, instructions: buyIxs });
-  return { create, buy };
+  const { blockhash } = await rpc().getLatestBlockhash("confirmed");
+  return packTx({ user: input.user, blockhash, instructions });
 };
 
 export const claimCoinFees = async (mint: PublicKey, creator: Keypair) => {

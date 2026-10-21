@@ -7,7 +7,7 @@ import { sql } from "./db.js";
 import { CARDS_MINT, SOL_MINT, quoteSwap, swapTransaction } from "./jupiter.js";
 import { deriveCreator } from "./creator.js";
 import { requireVault } from "./keys.js";
-import { buildCreate } from "./pump.js";
+import { buildBuy, buildCreate } from "./pump.js";
 
 const idOf = () => randomBytes(9).toString("base64url");
 
@@ -132,7 +132,7 @@ export const buildLaunch = async (raw: unknown) => {
   const metadataUri = ipfs || hostedUri;
   if (metadataUri.length > 200) throw new Error("The metadata address is too long for pump.fun.");
 
-  const transactions: { kind: "swap" | "create" | "buy"; tx: string }[] = [];
+  const transactions: { kind: "swap" | "create" | "buy"; tx: string; quoteRaw?: string }[] = [];
   let quoteRaw = 0n;
   if (input.devBuySol > 0) {
     const lamports = BigInt(Math.round(input.devBuySol * 1_000_000_000));
@@ -144,20 +144,20 @@ export const buildLaunch = async (raw: unknown) => {
     });
     quoteRaw = BigInt(quote.otherAmountThreshold || quote.outAmount || 0);
     if (quoteRaw <= 0n) throw new Error("Jupiter did not quote a CARDS amount for this dev buy.");
-    transactions.push({ kind: "swap", tx: await swapTransaction(quote, wallet.toBase58()) });
+    transactions.push({ kind: "swap", tx: await swapTransaction(quote, wallet.toBase58()), quoteRaw: quoteRaw.toString() });
   }
   const creator = await allocateCreator();
-  const built = await buildCreate({
-    mint,
-    user: wallet,
-    creator: creator.publicKey,
-    name: input.name,
-    symbol,
-    uri: metadataUri,
-    quoteRaw,
+  transactions.push({
+    kind: "create",
+    tx: await buildCreate({
+      mint,
+      user: wallet,
+      creator: creator.publicKey,
+      name: input.name,
+      symbol,
+      uri: metadataUri,
+    }),
   });
-  transactions.push({ kind: "create", tx: built.create });
-  if (built.buy) transactions.push({ kind: "buy", tx: built.buy });
 
   await sql`
     INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, website_url, image_id, metadata_uri, dev_buy_sol, creator, creator_index, transactions)
@@ -201,6 +201,18 @@ const signedBy = (raw: Buffer, key: PublicKey) => {
   }
 };
 
+type StoredTx = { kind: string; tx: string; quoteRaw?: string };
+
+const rememberBuy = async (launch: { id: string; wallet: string; mint: string; dev_buy_sol: string; transactions: StoredTx[] }) => {
+  if (!(Number(launch.dev_buy_sol) > 0)) return null;
+  const quoteRaw = BigInt(launch.transactions.find((item) => item.kind === "swap")?.quoteRaw || "0");
+  if (quoteRaw <= 0n) return null;
+  const tx = await buildBuy({ mint: new PublicKey(launch.mint), user: new PublicKey(launch.wallet), quoteRaw });
+  const next = [...launch.transactions.filter((item) => item.kind !== "buy"), { kind: "buy", tx }];
+  await sql`UPDATE launches SET transactions = ${JSON.stringify(next)}::jsonb WHERE id = ${launch.id}`;
+  return tx;
+};
+
 export const submitLaunch = async (launchId: string, signed: string[]) => {
   const rows = await sql<
     {
@@ -216,14 +228,17 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
       dev_buy_sol: string;
       creator: string | null;
       creator_index: number | null;
-      transactions: { kind: string; tx: string }[];
+      transactions: StoredTx[];
       status: string;
     }[]
   >`SELECT * FROM launches WHERE id = ${launchId}`;
   const launch = rows[0];
   if (!launch) throw new Error("This launch has expired. Build it again.");
-  if (launch.status === "live") return { mint: launch.mint, signature: null, already: true };
-  const expected = launch.transactions || [];
+  if (launch.status === "live") {
+    const buy = await rememberBuy(launch);
+    return { mint: launch.mint, signature: null, already: true, buy };
+  }
+  const expected = (launch.transactions || []).filter((item) => item.kind !== "buy");
   if (signed.length !== expected.length) throw new Error("Sign every transaction in this launch.");
   if (!launch.creator || launch.creator_index == null) throw new Error("Build this launch again.");
   const wallet = new PublicKey(launch.wallet);
@@ -259,7 +274,26 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
     ON CONFLICT (mint) DO NOTHING
   `;
   await sql`UPDATE launches SET status = 'live' WHERE id = ${launch.id}`;
-  return { mint: launch.mint, signature, already: false };
+  const buy = await rememberBuy(launch).catch((err) => {
+    console.error("buy", err instanceof Error ? err.message : "failed");
+    return null;
+  });
+  return { mint: launch.mint, signature, already: false, buy };
+};
+
+export const submitBuy = async (launchId: string, signed: string) => {
+  const rows = await sql<{ id: string; wallet: string; mint: string; transactions: StoredTx[]; status: string }[]>`
+    SELECT id, wallet, mint, transactions, status FROM launches WHERE id = ${launchId}
+  `;
+  const launch = rows[0];
+  if (!launch || launch.status !== "live") throw new Error("Launch the coin before the dev buy.");
+  const expected = (launch.transactions || []).find((item) => item.kind === "buy");
+  if (!expected) throw new Error("Build the dev buy again.");
+  if (!messagesMatch(expected.tx, signed)) throw new Error("The signed buy does not match the one we built.");
+  const bytes = Buffer.from(signed, "base64");
+  if (!signedBy(bytes, new PublicKey(launch.wallet))) throw new Error("Sign the dev buy with the wallet that launched the coin.");
+  const signature = await sendSigned(signed);
+  return { mint: launch.mint, signature };
 };
 
 export const media = async (id: string) => {

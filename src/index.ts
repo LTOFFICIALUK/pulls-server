@@ -4,7 +4,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { getCoin, listCoins, listPulls, listRecords, stats } from "./coins.js";
 import { ensurePullsCoin } from "./fees.js";
-import { buildLaunch, media, metadata, submitLaunch } from "./launch.js";
+import { buildLaunch, media, metadata, submitBuy, submitLaunch } from "./launch.js";
 import { migrate } from "./migrate.js";
 import { cashOut, keepCard, keepMessage, submitCashOut } from "./packs.js";
 import { publicMessage } from "./public-error.js";
@@ -158,6 +158,15 @@ app.post("/v1/launch/submit", async (req, res) => {
   try {
     const body = z.object({ launchId: z.string().min(4), transactions: z.array(z.string().min(20)).min(1).max(4) }).parse(req.body);
     res.json(await submitLaunch(body.launchId, body.transactions));
+  } catch (err) {
+    sendError(res, 400, err);
+  }
+});
+
+app.post("/v1/launch/buy", async (req, res) => {
+  try {
+    const body = z.object({ launchId: z.string().min(4), transaction: z.string().min(20) }).parse(req.body);
+    res.json(await submitBuy(body.launchId, body.transaction));
   } catch (err) {
     sendError(res, 400, err);
   }
