@@ -67,7 +67,7 @@ export const buildCreate = async (input: {
     quoteTokenProgram,
     ...(pumpQuote ? { pumpQuote } : {}),
   });
-  return packTx({ user: input.user, mint: input.mint, blockhash, instructions: [createIx] });
+  return packTx({ user: input.user, blockhash, instructions: [createIx] });
 };
 
 export const buildBuy = async (input: { mint: PublicKey; user: PublicKey; quoteRaw: bigint }) => {

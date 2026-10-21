@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import bs58 from "bs58";
 import { z } from "zod";
 import { config } from "./config.js";
 import { encodeTx, messagesMatch, pubkey, sendSigned } from "./chain.js";
@@ -175,13 +176,14 @@ export const buildLaunch = async (raw: unknown) => {
       ${input.devBuySol},
       ${creator.publicKey.toBase58()},
       ${creator.index},
-      ${JSON.stringify(transactions)}::jsonb
+      ${sql.json(transactions)}
     )
   `;
 
   return {
     launchId,
     mint: mint.publicKey.toBase58(),
+    mintSecret: bs58.encode(mint.secretKey),
     creator: creator.publicKey.toBase58(),
     metadataUri,
     transactions: transactions.map((item) => ({ kind: item.kind, tx: item.tx })),
@@ -203,13 +205,25 @@ const signedBy = (raw: Buffer, key: PublicKey) => {
 
 type StoredTx = { kind: string; tx: string; quoteRaw?: string };
 
+const txList = (value: unknown): StoredTx[] => {
+  let current = value;
+  for (let attempt = 0; attempt < 3 && typeof current === "string"; attempt += 1) {
+    try {
+      current = JSON.parse(current);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(current) ? current : [];
+};
+
 const rememberBuy = async (launch: { id: string; wallet: string; mint: string; dev_buy_sol: string; transactions: StoredTx[] }) => {
   if (!(Number(launch.dev_buy_sol) > 0)) return null;
   const quoteRaw = BigInt(launch.transactions.find((item) => item.kind === "swap")?.quoteRaw || "0");
   if (quoteRaw <= 0n) return null;
   const tx = await buildBuy({ mint: new PublicKey(launch.mint), user: new PublicKey(launch.wallet), quoteRaw });
   const next = [...launch.transactions.filter((item) => item.kind !== "buy"), { kind: "buy", tx }];
-  await sql`UPDATE launches SET transactions = ${JSON.stringify(next)}::jsonb WHERE id = ${launch.id}`;
+  await sql`UPDATE launches SET transactions = ${sql.json(next)} WHERE id = ${launch.id}`;
   return tx;
 };
 
@@ -234,11 +248,12 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
   >`SELECT * FROM launches WHERE id = ${launchId}`;
   const launch = rows[0];
   if (!launch) throw new Error("This launch has expired. Build it again.");
+  launch.transactions = txList(launch.transactions);
   if (launch.status === "live") {
     const buy = await rememberBuy(launch);
     return { mint: launch.mint, signature: null, already: true, buy };
   }
-  const expected = (launch.transactions || []).filter((item) => item.kind !== "buy");
+  const expected = launch.transactions.filter((item) => item.kind !== "buy");
   if (signed.length !== expected.length) throw new Error("Sign every transaction in this launch.");
   if (!launch.creator || launch.creator_index == null) throw new Error("Build this launch again.");
   const wallet = new PublicKey(launch.wallet);
@@ -287,7 +302,7 @@ export const submitBuy = async (launchId: string, signed: string) => {
   `;
   const launch = rows[0];
   if (!launch || launch.status !== "live") throw new Error("Launch the coin before the dev buy.");
-  const expected = (launch.transactions || []).find((item) => item.kind === "buy");
+  const expected = txList(launch.transactions).find((item) => item.kind === "buy");
   if (!expected) throw new Error("Build the dev buy again.");
   if (!messagesMatch(expected.tx, signed)) throw new Error("The signed buy does not match the one we built.");
   const bytes = Buffer.from(signed, "base64");
