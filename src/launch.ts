@@ -32,6 +32,7 @@ export const launchSchema = z.object({
   symbol: z.string().trim().min(1).max(13).regex(/^[A-Za-z0-9]+$/),
   description: z.string().trim().max(500).optional().default(""),
   xUrl: z.string().trim().max(200).optional().default(""),
+  website: z.string().trim().max(200).optional().default(""),
   image: imageSchema,
   devBuySol: z.number().min(0).max(100).optional().default(0),
   vanity: z.string().trim().max(2).optional().default(""),
@@ -46,6 +47,19 @@ const parseImage = (image: string) => {
   const bytes = Buffer.from(match[2], "base64");
   if (bytes.length < 32 || bytes.length > 1_500_000) throw new Error("Use an image under 1.5 MB.");
   return { type, bytes };
+};
+
+const cleanWebsite = (value: string) => {
+  if (!value) return "";
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("The website needs a full https address.");
+  }
+  if (url.protocol !== "https:") throw new Error("The website needs a full https address.");
+  if (!url.hostname.includes(".")) throw new Error("The website needs a full https address.");
+  return url.toString();
 };
 
 const cleanLink = (value: string) => {
@@ -73,16 +87,17 @@ const grind = (suffix: string) => {
   return null;
 };
 
-const metaJson = (input: { name: string; symbol: string; description: string; image: string; xUrl: string }) => ({
+const metaJson = (input: { name: string; symbol: string; description: string; image: string; xUrl: string; website: string }) => ({
   name: input.name,
   symbol: input.symbol,
   description: input.description,
   image: input.image,
   showName: true,
   twitter: input.xUrl || undefined,
+  website: input.website || undefined,
 });
 
-const uploadIpfs = async (input: { name: string; symbol: string; description: string; xUrl: string; type: string; bytes: Buffer }) => {
+const uploadIpfs = async (input: { name: string; symbol: string; description: string; xUrl: string; website: string; type: string; bytes: Buffer }) => {
   const form = new FormData();
   form.append("file", new Blob([new Uint8Array(input.bytes)], { type: input.type }), "coin.png");
   form.append("name", input.name);
@@ -90,6 +105,7 @@ const uploadIpfs = async (input: { name: string; symbol: string; description: st
   form.append("description", input.description);
   form.append("showName", "true");
   if (input.xUrl) form.append("twitter", input.xUrl);
+  if (input.website) form.append("website", input.website);
   const res = await fetch("https://pump.fun/api/ipfs", { method: "POST", body: form });
   if (!res.ok) return null;
   const body = (await res.json()) as { metadataUri?: string };
@@ -103,6 +119,7 @@ export const buildLaunch = async (raw: unknown) => {
   requireVault();
   const image = parseImage(input.image);
   const xUrl = cleanLink(input.xUrl || "");
+  const website = cleanWebsite(input.website || "");
   const symbol = input.symbol.toUpperCase();
   const launchId = idOf();
   const mint = input.vanity ? grind(input.vanity) : Keypair.generate();
@@ -111,7 +128,7 @@ export const buildLaunch = async (raw: unknown) => {
   await sql`INSERT INTO assets (id, content_type, bytes) VALUES (${launchId}, ${image.type}, ${image.bytes})`;
   const imageUrl = `${config.publicApiUrl}/v1/media/${launchId}`;
   const hostedUri = `${config.publicApiUrl}/v1/meta/${launchId}`;
-  const ipfs = await uploadIpfs({ ...input, symbol, xUrl, type: image.type, bytes: image.bytes }).catch(() => null);
+  const ipfs = await uploadIpfs({ ...input, symbol, xUrl, website, type: image.type, bytes: image.bytes }).catch(() => null);
   const metadataUri = ipfs || hostedUri;
   if (metadataUri.length > 200) throw new Error("The metadata address is too long for pump.fun.");
 
@@ -144,7 +161,7 @@ export const buildLaunch = async (raw: unknown) => {
   });
 
   await sql`
-    INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, image_id, metadata_uri, dev_buy_sol, creator, creator_index, transactions)
+    INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, website_url, image_id, metadata_uri, dev_buy_sol, creator, creator_index, transactions)
     VALUES (
       ${launchId},
       ${wallet.toBase58()},
@@ -153,6 +170,7 @@ export const buildLaunch = async (raw: unknown) => {
       ${symbol},
       ${input.description || ""},
       ${xUrl || null},
+      ${website || null},
       ${launchId},
       ${metadataUri},
       ${input.devBuySol},
@@ -195,6 +213,7 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
       description: string;
       x_url: string | null;
       metadata_uri: string;
+      website_url: string | null;
       dev_buy_sol: string;
       creator: string | null;
       creator_index: number | null;
@@ -222,7 +241,7 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
   }
   const signature = signatures[signatures.length - 1] || null;
   await sql`
-    INSERT INTO coins (mint, name, symbol, description, image_url, metadata_uri, x_url, launcher, creator, creator_index, launch_signature, dev_buy_sol)
+    INSERT INTO coins (mint, name, symbol, description, image_url, metadata_uri, x_url, website_url, launcher, creator, creator_index, launch_signature, dev_buy_sol)
     VALUES (
       ${launch.mint},
       ${launch.name},
@@ -231,6 +250,7 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
       ${`${config.publicApiUrl}/v1/media/${launch.id}`},
       ${launch.metadata_uri},
       ${launch.x_url},
+      ${launch.website_url},
       ${launch.wallet},
       ${launch.creator},
       ${launch.creator_index},
@@ -250,8 +270,8 @@ export const media = async (id: string) => {
 
 export const metadata = async (id: string) => {
   const rows = await sql<
-    { name: string; symbol: string; description: string; x_url: string | null }[]
-  >`SELECT name, symbol, description, x_url FROM launches WHERE id = ${id}`;
+    { name: string; symbol: string; description: string; x_url: string | null; website_url: string | null }[]
+  >`SELECT name, symbol, description, x_url, website_url FROM launches WHERE id = ${id}`;
   const row = rows[0];
   if (!row) return null;
   return metaJson({
@@ -260,5 +280,6 @@ export const metadata = async (id: string) => {
     description: row.description,
     image: `${config.publicApiUrl}/v1/media/${id}`,
     xUrl: row.x_url || "",
+    website: row.website_url || "",
   });
 };

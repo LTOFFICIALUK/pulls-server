@@ -19,6 +19,7 @@ type CoinRow = {
   description: string;
   image_url: string;
   x_url: string | null;
+  website_url: string | null;
   pack_balance_usdc: string;
   holder_count: number;
   created_at: Date;
@@ -28,7 +29,7 @@ type CoinRow = {
 
 const coinsSql = async () =>
   sql<CoinRow[]>`
-    SELECT c.mint, c.name, c.symbol, c.description, c.image_url, c.x_url, c.pack_balance_usdc, c.holder_count, c.created_at,
+    SELECT c.mint, c.name, c.symbol, c.description, c.image_url, c.x_url, c.website_url, c.pack_balance_usdc, c.holder_count, c.created_at,
       (SELECT count(*) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL) AS pulls,
       (SELECT COALESCE(SUM(p.insured_value_usd), 0) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL AND (p.choice IS NULL OR p.choice <> 'cashout')) AS vault_usd
     FROM coins c
@@ -63,6 +64,7 @@ const presentCoin = (row: CoinRow, price: bigint, pace: Map<string, number>) => 
     description: row.description,
     imageUrl: row.image_url,
     xUrl: row.x_url,
+    websiteUrl: row.website_url,
     holders: row.holder_count,
     pulls: Number(row.pulls),
     vaultUsd: Number(row.vault_usd),
@@ -81,7 +83,7 @@ export const listCoins = async () => {
 export const getCoin = async (mint: string) => {
   const [rows, price, pace, pulls] = await Promise.all([
     sql<CoinRow[]>`
-      SELECT c.mint, c.name, c.symbol, c.description, c.image_url, c.x_url, c.pack_balance_usdc, c.holder_count, c.created_at,
+      SELECT c.mint, c.name, c.symbol, c.description, c.image_url, c.x_url, c.website_url, c.pack_balance_usdc, c.holder_count, c.created_at,
         (SELECT count(*) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL) AS pulls,
         (SELECT COALESCE(SUM(p.insured_value_usd), 0) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL AND (p.choice IS NULL OR p.choice <> 'cashout')) AS vault_usd
       FROM coins c WHERE c.mint = ${mint}
