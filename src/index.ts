@@ -3,6 +3,7 @@ import express from "express";
 import { z } from "zod";
 import { config } from "./config.js";
 import { getCoin, listCoins, listPulls, listRecords, stats } from "./coins.js";
+import { ensurePullsCoin } from "./fees.js";
 import { buildLaunch, media, metadata, submitLaunch } from "./launch.js";
 import { migrate } from "./migrate.js";
 import { cashOut, keepCard, keepMessage, submitCashOut } from "./packs.js";
@@ -205,6 +206,7 @@ app.post("/v1/packs/:id/cashout/submit", async (req, res) => {
 
 const listen = async () => {
   await migrate();
+  await ensurePullsCoin();
   app.listen(config.port, () => {
     console.log("pulls api on", config.port);
   });

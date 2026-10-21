@@ -10,6 +10,7 @@ export const tick = async () => {
   running = true;
   const lock = await sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(84218421) AS locked`;
   if (!lock[0]?.locked) {
+    console.error("tick", "busy");
     running = false;
     return;
   }
