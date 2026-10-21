@@ -1,0 +1,14 @@
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
+import { config } from "./config.js";
+
+export const vaultKeypair = () => {
+  if (!config.vaultSecret) return null;
+  return Keypair.fromSecretKey(bs58.decode(config.vaultSecret));
+};
+
+export const requireVault = () => {
+  const key = vaultKeypair();
+  if (!key) throw new Error("The vault is not configured yet.");
+  return key;
+};
