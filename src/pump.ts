@@ -1,5 +1,6 @@
 import {
   createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
@@ -13,13 +14,16 @@ import {
 import BN from "bn.js";
 import {
   OnlinePumpSdk,
+  PUMP_PROGRAM_ID,
   PUMP_SDK,
   bondingCurvePda,
   getBuyTokenAmountFromSolAmount,
+  isBondingCurveMigrated,
 } from "@pump-fun/pump-sdk";
 import { canonicalPumpPoolPda } from "@pump-fun/pump-swap-sdk";
+import { feeClaimPlan } from "./claim-plan.js";
 import { encodeTx, rpc, signAndSend } from "./chain.js";
-import { CARDS_MINT } from "./jupiter.js";
+import { CARDS_MINT, tokenBalance } from "./jupiter.js";
 import { requireVault } from "./keys.js";
 
 const online = () => new OnlinePumpSdk(rpc());
@@ -30,12 +34,12 @@ export const poolAddress = (mint: PublicKey) => canonicalPumpPoolPda(mint, CARDS
 export const buildCreate = async (input: {
   mint: Keypair;
   user: PublicKey;
+  creator: PublicKey;
   name: string;
   symbol: string;
   uri: string;
   quoteRaw?: bigint;
 }) => {
-  const vault = requireVault();
   const sdk = online();
   const resolved = await sdk.resolveQuoteMint(CARDS_MINT).catch(() => null);
   const quoteTokenProgram = resolved?.quoteTokenProgram || TOKEN_PROGRAM_ID;
@@ -69,7 +73,7 @@ export const buildCreate = async (input: {
         name: input.name,
         symbol: input.symbol,
         uri: input.uri,
-        creator: vault.publicKey,
+        creator: input.creator,
         user: input.user,
         amount,
         quoteAmount,
@@ -86,7 +90,7 @@ export const buildCreate = async (input: {
         name: input.name,
         symbol: input.symbol,
         uri: input.uri,
-        creator: vault.publicKey,
+        creator: input.creator,
         user: input.user,
         mayhemMode: false,
         quoteMint: CARDS_MINT,
@@ -101,39 +105,54 @@ export const buildCreate = async (input: {
   return encodeTx(tx);
 };
 
-export const claimCards = async (mint: PublicKey, signer: Keypair) => {
-  const sdk = online();
-  const connection = rpc();
-  const owner = signer.publicKey;
-  const ata = getAssociatedTokenAddressSync(CARDS_MINT, owner, true, TOKEN_PROGRAM_ID);
-  const signatures: string[] = [];
-  const send = async (instructions: TransactionInstruction[]) => {
-    if (!instructions.length) return;
-    const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ...instructions);
-    signatures.push(await signAndSend(tx, [signer]));
-  };
-  const sweep = await PUMP_SDK.sweepCreatorFeeInstruction({
-    payer: owner,
-    mint,
-    creator: owner,
-    quoteMint: CARDS_MINT,
-    quoteTokenProgram: TOKEN_PROGRAM_ID,
-  });
-  await send([
-    createAssociatedTokenAccountIdempotentInstruction(owner, ata, owner, CARDS_MINT, TOKEN_PROGRAM_ID),
-    sweep,
-  ]).catch(() => undefined);
-  const pool = poolAddress(mint);
-  if (await connection.getAccountInfo(pool)) {
-    const poolSweep = await PUMP_SDK.sweepPoolCreatorFeeInstruction({
-      payer: owner,
-      mint,
-      coinCreator: owner,
-      quoteMint: CARDS_MINT,
-      quoteTokenProgram: TOKEN_PROGRAM_ID,
-    });
-    await send([poolSweep]).catch(() => undefined);
+export const claimCoinFees = async (mint: PublicKey, creator: Keypair) => {
+  const vault = requireVault();
+  const curveInfo = await rpc().getAccountInfo(bondingCurvePda(mint));
+  if (!curveInfo) return null;
+  const curve = PUMP_SDK.decodeBondingCurve(curveInfo);
+  if (!curve.creator.equals(creator.publicKey)) {
+    console.error("claim", mint.toBase58(), "creator on chain differs");
+    return null;
   }
-  await send(await sdk.collectCoinCreatorFeeV2Instructions(owner, CARDS_MINT, TOKEN_PROGRAM_ID, owner));
-  return signatures.at(-1) || null;
+  const migrated = curve.complete || isBondingCurveMigrated(curve);
+  const balances = await online().getCreatorVaultQuoteBalances(creator.publicKey, [CARDS_MINT]);
+  const cards = balances.find((row) => row.mint.equals(CARDS_MINT));
+  const pumpRaw = BigInt(cards?.pumpVault.toString() || "0");
+  const ammRaw = BigInt(cards?.ammVault.toString() || "0");
+  const plan = feeClaimPlan(migrated, pumpRaw, ammRaw);
+  if (!plan.collectBonding && !plan.collectPool) return null;
+  const built = await online().collectCoinCreatorFeeV2Instructions(
+    creator.publicKey,
+    CARDS_MINT,
+    TOKEN_PROGRAM_ID,
+    vault.publicKey,
+  );
+  const instructions = built.filter((ix) => (ix.programId.equals(PUMP_PROGRAM_ID) ? plan.collectBonding : plan.collectPool));
+  if (!instructions.length) return null;
+  const creatorAta = getAssociatedTokenAddressSync(CARDS_MINT, creator.publicKey, true, TOKEN_PROGRAM_ID);
+  instructions.unshift(
+    createAssociatedTokenAccountIdempotentInstruction(
+      vault.publicKey,
+      creatorAta,
+      creator.publicKey,
+      CARDS_MINT,
+      TOKEN_PROGRAM_ID,
+    ),
+  );
+  const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ...instructions);
+  const creatorSigns = instructions.some((ix) => ix.keys.some((key) => key.isSigner && key.pubkey.equals(creator.publicKey)));
+  return signAndSend(tx, creatorSigns ? [vault, creator] : [vault], vault.publicKey);
+};
+
+export const sweepCreatorCards = async (creator: Keypair) => {
+  const vault = requireVault();
+  const amount = await tokenBalance(creator.publicKey, CARDS_MINT);
+  if (amount <= 0n) return null;
+  const from = getAssociatedTokenAddressSync(CARDS_MINT, creator.publicKey, true, TOKEN_PROGRAM_ID);
+  const to = getAssociatedTokenAddressSync(CARDS_MINT, vault.publicKey, true, TOKEN_PROGRAM_ID);
+  const tx = new Transaction().add(
+    createAssociatedTokenAccountIdempotentInstruction(vault.publicKey, to, vault.publicKey, CARDS_MINT, TOKEN_PROGRAM_ID),
+    createTransferCheckedInstruction(from, CARDS_MINT, to, creator.publicKey, amount, 6, [], TOKEN_PROGRAM_ID),
+  );
+  return signAndSend(tx, [vault, creator], vault.publicKey);
 };

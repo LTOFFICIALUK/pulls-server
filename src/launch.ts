@@ -5,10 +5,24 @@ import { config } from "./config.js";
 import { encodeTx, messagesMatch, pubkey, sendSigned } from "./chain.js";
 import { sql } from "./db.js";
 import { CARDS_MINT, SOL_MINT, quoteSwap, swapTransaction } from "./jupiter.js";
+import { deriveCreator } from "./creator.js";
 import { requireVault } from "./keys.js";
 import { buildCreate } from "./pump.js";
 
 const idOf = () => randomBytes(9).toString("base64url");
+
+const allocateCreator = async () => {
+  if (!config.creatorMasterSeed) throw new Error("The creator seed is not configured yet.");
+  const rows = await sql<{ idx: number }[]>`
+    UPDATE creator_seq
+    SET next_index = next_index + 1
+    WHERE id = 1
+    RETURNING (next_index - 1) AS idx
+  `;
+  const index = Number(rows[0]?.idx);
+  if (!Number.isInteger(index) || index < 0) throw new Error("The creator index is not ready.");
+  return { index, publicKey: deriveCreator(config.creatorMasterSeed, index).publicKey };
+};
 
 const imageSchema = z.string().min(32).max(2_200_000);
 
@@ -86,7 +100,7 @@ const uploadIpfs = async (input: { name: string; symbol: string; description: st
 export const buildLaunch = async (raw: unknown) => {
   const input = launchSchema.parse(raw);
   const wallet = pubkey(input.wallet, "Your wallet");
-  const vault = requireVault();
+  requireVault();
   const image = parseImage(input.image);
   const xUrl = cleanLink(input.xUrl || "");
   const symbol = input.symbol.toUpperCase();
@@ -115,11 +129,13 @@ export const buildLaunch = async (raw: unknown) => {
     if (quoteRaw <= 0n) throw new Error("Jupiter did not quote a CARDS amount for this dev buy.");
     transactions.push({ kind: "swap", tx: await swapTransaction(quote, wallet.toBase58()) });
   }
+  const creator = await allocateCreator();
   transactions.push({
     kind: "create",
     tx: await buildCreate({
       mint,
       user: wallet,
+      creator: creator.publicKey,
       name: input.name,
       symbol,
       uri: metadataUri,
@@ -128,7 +144,7 @@ export const buildLaunch = async (raw: unknown) => {
   });
 
   await sql`
-    INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, image_id, metadata_uri, dev_buy_sol, transactions)
+    INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, image_id, metadata_uri, dev_buy_sol, creator, creator_index, transactions)
     VALUES (
       ${launchId},
       ${wallet.toBase58()},
@@ -140,6 +156,8 @@ export const buildLaunch = async (raw: unknown) => {
       ${launchId},
       ${metadataUri},
       ${input.devBuySol},
+      ${creator.publicKey.toBase58()},
+      ${creator.index},
       ${JSON.stringify(transactions)}::jsonb
     )
   `;
@@ -147,7 +165,7 @@ export const buildLaunch = async (raw: unknown) => {
   return {
     launchId,
     mint: mint.publicKey.toBase58(),
-    creator: vault.publicKey.toBase58(),
+    creator: creator.publicKey.toBase58(),
     metadataUri,
     transactions: transactions.map((item) => ({ kind: item.kind, tx: item.tx })),
   };
@@ -178,6 +196,8 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
       x_url: string | null;
       metadata_uri: string;
       dev_buy_sol: string;
+      creator: string | null;
+      creator_index: number | null;
       transactions: { kind: string; tx: string }[];
       status: string;
     }[]
@@ -187,7 +207,7 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
   if (launch.status === "live") return { mint: launch.mint, signature: null, already: true };
   const expected = launch.transactions || [];
   if (signed.length !== expected.length) throw new Error("Sign every transaction in this launch.");
-  const vault = requireVault();
+  if (!launch.creator || launch.creator_index == null) throw new Error("Build this launch again.");
   const wallet = new PublicKey(launch.wallet);
   const mint = new PublicKey(launch.mint);
   const signatures: string[] = [];
@@ -202,7 +222,7 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
   }
   const signature = signatures[signatures.length - 1] || null;
   await sql`
-    INSERT INTO coins (mint, name, symbol, description, image_url, metadata_uri, x_url, launcher, creator, launch_signature, dev_buy_sol)
+    INSERT INTO coins (mint, name, symbol, description, image_url, metadata_uri, x_url, launcher, creator, creator_index, launch_signature, dev_buy_sol)
     VALUES (
       ${launch.mint},
       ${launch.name},
@@ -212,7 +232,8 @@ export const submitLaunch = async (launchId: string, signed: string[]) => {
       ${launch.metadata_uri},
       ${launch.x_url},
       ${launch.wallet},
-      ${vault.publicKey.toBase58()},
+      ${launch.creator},
+      ${launch.creator_index},
       ${signature},
       ${launch.dev_buy_sol}
     )

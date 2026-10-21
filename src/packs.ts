@@ -121,6 +121,10 @@ const chooseWinner = async (pack: PackRow) => {
   if (!signature) throw new Error("The pack payment is not on chain yet.");
   const vault = requireVault();
   const snap = await snapshotHolders(new PublicKey(pack.mint), vault.publicKey.toBase58());
+  const creators = await sql<{ creator: string }[]>`SELECT creator FROM coins WHERE creator_index IS NOT NULL`;
+  for (const row of creators) {
+    if (row.creator) snap.excluded.push(row.creator);
+  }
   const eligible = eligibleHolders(snap.holders, snap.supply, new Set(snap.excluded));
   const seed = seedFromSignature(signature);
   const winner = pickWinner(eligible, seed);

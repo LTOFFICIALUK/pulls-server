@@ -33,6 +33,7 @@ export const config = {
     .filter(Boolean),
   heliusRpc: heliusRpc(),
   vaultSecret: raw(process.env.VAULT_SECRET_KEY),
+  creatorMasterSeed: raw(process.env.CREATOR_MASTER_SEED),
   platformSecret: raw(process.env.PLATFORM_SECRET_KEY),
   platformWallet: raw(process.env.PLATFORM_WALLET || PLATFORM_WALLET_ADDRESS),
   pullsMint: raw(process.env.PULLS_MINT || process.env.PULL_MINT || PULLS_MINT_ADDRESS),

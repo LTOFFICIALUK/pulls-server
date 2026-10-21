@@ -2,8 +2,8 @@ import { PublicKey } from "@solana/web3.js";
 import { config } from "./config.js";
 import { asBigint, sql } from "./db.js";
 import { CARDS_MINT, USDC_MINT, tokenBalance, transferUsdc, vaultSwap } from "./jupiter.js";
-import { platformKeypair, requireVault, vaultKeypair } from "./keys.js";
-import { claimCards } from "./pump.js";
+import { creatorKeypair, requireVault, vaultKeypair } from "./keys.js";
+import { claimCoinFees, sweepCreatorCards } from "./pump.js";
 import { splitUsdc } from "./split.js";
 
 export const ensurePullsCoin = async () => {
@@ -14,7 +14,7 @@ export const ensurePullsCoin = async () => {
       ${config.pullsMint},
       'Pulls',
       'PULLS',
-      'The Pulls coin. Ten percent of every other coin tops up packs for holders.',
+      'Packs come from 10 percent of the fees of every coin launched on Pulls.',
       ${config.platformWallet},
       ${config.platformWallet},
       'proxima'
@@ -98,67 +98,61 @@ export const flushPlatform = async () => {
   `;
 };
 
-const claimPullsForPlatform = async () => {
-  const signer = platformKeypair();
-  if (!signer || !config.pullsMint) return;
-  const before = await tokenBalance(signer.publicKey, CARDS_MINT);
-  let signature: string | null = null;
-  try {
-    signature = await claimCards(new PublicKey(config.pullsMint), signer);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "claim";
-    if (!/insufficient|no record|0x0|empty|debit/i.test(message)) console.error("claim", "PULLS", message);
-  }
-  const after = await tokenBalance(signer.publicKey, CARDS_MINT);
-  const gained = after > before ? after - before : 0n;
-  if (gained <= 0n) return;
-  const claimSignature = signature || `platform-${config.pullsMint}-${after.toString()}`;
-  await sql`
-    INSERT INTO fee_claims (mint, cards_raw, signature)
-    VALUES (${config.pullsMint}, ${gained.toString()}::bigint, ${claimSignature})
-    ON CONFLICT (signature) DO NOTHING
-  `;
-};
+const quietClaim = (message: string) => /insufficient|no record|0x0|empty|debit|account not found/i.test(message);
 
 export const claimAndSwap = async () => {
   await ensurePullsCoin();
-  await claimPullsForPlatform();
   if (!vaultKeypair()) return;
   const vault = requireVault();
-  const coins = await sql<{ mint: string; symbol: string; cards_pending: string }[]>`
-    SELECT mint, symbol, cards_pending FROM coins ORDER BY created_at ASC
+  if (!config.creatorMasterSeed) {
+    console.error("claim", "The creator seed is not configured yet.");
+  }
+  const coins = await sql<{ mint: string; symbol: string; creator: string; creator_index: number | null }[]>`
+    SELECT mint, symbol, creator, creator_index
+    FROM coins
+    WHERE creator_index IS NOT NULL
+      AND mint IS DISTINCT FROM ${config.pullsMint}
+    ORDER BY created_at ASC
   `;
   for (const coin of coins) {
-    if (coin.mint === config.pullsMint) continue;
-    const mint = new PublicKey(coin.mint);
-    const before = await tokenBalance(vault.publicKey, CARDS_MINT);
-    let signature: string | null = null;
-    try {
-      signature = await claimCards(mint, vault);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "claim";
-      if (!/insufficient|no record|0x0|empty|debit/i.test(message)) {
-        console.error("claim", coin.symbol, message);
-      }
-    }
-    const after = await tokenBalance(vault.publicKey, CARDS_MINT);
-    const gained = after > before ? after - before : 0n;
-    if (gained > 0n) {
-      const claimSignature = signature || `balance-${coin.mint}-${after.toString()}`;
-      const inserted = await sql`
-        INSERT INTO fee_claims (mint, cards_raw, signature)
-        VALUES (${coin.mint}, ${gained.toString()}::bigint, ${claimSignature})
-        ON CONFLICT (signature) DO NOTHING
-        RETURNING id
-      `;
-      if (inserted.length) {
-        await sql`
-          UPDATE coins
-          SET cards_pending = cards_pending + ${gained.toString()}::bigint,
-              cards_claimed = cards_claimed + ${gained.toString()}::bigint,
-              updated_at = now()
-          WHERE mint = ${coin.mint}
-        `;
+    const index = Number(coin.creator_index);
+    if (config.creatorMasterSeed && Number.isInteger(index) && index >= 0) {
+      const creator = creatorKeypair(index);
+      if (creator.publicKey.toBase58() !== coin.creator) {
+        console.error("claim", coin.symbol, "creator does not match the seed");
+      } else {
+        const mint = new PublicKey(coin.mint);
+        try {
+          await claimCoinFees(mint, creator);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "claim";
+          if (!quietClaim(message)) console.error("claim", coin.symbol, message);
+        }
+        const sitting = await tokenBalance(creator.publicKey, CARDS_MINT);
+        if (sitting > 0n) {
+          try {
+            const signature = await sweepCreatorCards(creator);
+            if (signature) {
+              const inserted = await sql`
+                INSERT INTO fee_claims (mint, cards_raw, signature)
+                VALUES (${coin.mint}, ${sitting.toString()}::bigint, ${signature})
+                ON CONFLICT (signature) DO NOTHING
+                RETURNING id
+              `;
+              if (inserted.length) {
+                await sql`
+                  UPDATE coins
+                  SET cards_pending = cards_pending + ${sitting.toString()}::bigint,
+                      cards_claimed = cards_claimed + ${sitting.toString()}::bigint,
+                      updated_at = now()
+                  WHERE mint = ${coin.mint}
+                `;
+              }
+            }
+          } catch (err) {
+            console.error("sweep", coin.symbol, err instanceof Error ? err.message : "sweep");
+          }
+        }
       }
     }
     const pendingRows = await sql<{ cards_pending: string }[]>`SELECT cards_pending FROM coins WHERE mint = ${coin.mint}`;

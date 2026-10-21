@@ -59,11 +59,11 @@ export const sendSigned = async (base64: string) => {
   return signature;
 };
 
-export const signAndSend = async (tx: Transaction, signers: Keypair[]) => {
+export const signAndSend = async (tx: Transaction, signers: Keypair[], feePayer?: PublicKey) => {
   const connection = rpc();
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
-  tx.feePayer = signers[0]?.publicKey;
+  tx.feePayer = feePayer || signers[0]?.publicKey;
   tx.sign(...signers);
   const signature = await sendSigned(Buffer.from(tx.serialize()).toString("base64"));
   await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed").catch(() => undefined);

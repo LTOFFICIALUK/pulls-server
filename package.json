@@ -7,7 +7,7 @@
     "build": "tsc --pretty false",
     "start": "tsc --pretty false && node --import ./src/anchor-hook.mjs dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/split.test.ts src/winner.test.ts src/machines.test.ts src/packs-state.test.ts src/grade.test.ts"
+    "test": "tsx --test src/split.test.ts src/winner.test.ts src/machines.test.ts src/packs-state.test.ts src/grade.test.ts src/creator.test.ts"
   },
   "engines": {
     "node": ">=20"

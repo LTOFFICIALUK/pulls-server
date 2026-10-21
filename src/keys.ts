@@ -1,6 +1,7 @@
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 import { config } from "./config.js";
+import { deriveCreator } from "./creator.js";
 
 export const vaultKeypair = () => {
   if (!config.vaultSecret) return null;
@@ -12,6 +13,8 @@ export const requireVault = () => {
   if (!key) throw new Error("The vault is not configured yet.");
   return key;
 };
+
+export const creatorKeypair = (index: number) => deriveCreator(config.creatorMasterSeed, index);
 
 export const platformKeypair = () => {
   if (!config.platformSecret) return null;
