@@ -14,7 +14,7 @@ export const ensurePullsCoin = async () => {
       ${config.pullsMint},
       'Pulls',
       'PULLS',
-      'Packs come from 10 percent of the fees of every coin launched on Pulls.',
+      'The Pulls coin.',
       ${config.platformWallet},
       ${config.platformWallet},
       'proxima'
@@ -25,17 +25,6 @@ export const ensurePullsCoin = async () => {
         description = EXCLUDED.description,
         updated_at = now()
   `;
-  const moved = await sql<{ pack_balance_usdc: string }[]>`
-    UPDATE coins
-    SET pack_balance_usdc = pack_balance_usdc + (SELECT pulls_owed_usdc FROM treasury WHERE id = 1),
-        updated_at = now()
-    WHERE mint = ${config.pullsMint}
-      AND (SELECT pulls_owed_usdc FROM treasury WHERE id = 1) > 0
-    RETURNING pack_balance_usdc
-  `;
-  if (moved.length) {
-    await sql`UPDATE treasury SET pulls_owed_usdc = 0, updated_at = now() WHERE id = 1`;
-  }
 };
 
 const credit = async (source: string, usdc: bigint, signature: string) => {
@@ -46,19 +35,6 @@ const credit = async (source: string, usdc: bigint, signature: string) => {
       SET pack_balance_usdc = pack_balance_usdc + ${parts.coin.toString()}::bigint, updated_at = now()
       WHERE mint = ${source}
     `;
-    if (config.pullsMint) {
-      await tx`
-        UPDATE coins
-        SET pack_balance_usdc = pack_balance_usdc + ${parts.pulls.toString()}::bigint, updated_at = now()
-        WHERE mint = ${config.pullsMint}
-      `;
-    } else {
-      await tx`
-        UPDATE treasury
-        SET pulls_owed_usdc = pulls_owed_usdc + ${parts.pulls.toString()}::bigint, updated_at = now()
-        WHERE id = 1
-      `;
-    }
     await tx`
       UPDATE treasury
       SET platform_owed_usdc = platform_owed_usdc + ${parts.platform.toString()}::bigint, updated_at = now()
@@ -68,7 +44,6 @@ const credit = async (source: string, usdc: bigint, signature: string) => {
       INSERT INTO ledger (source_mint, dest_mint, kind, usdc_raw, signature)
       VALUES
         (${source}, ${source}, 'coin_pack', ${parts.coin.toString()}::bigint, ${signature}),
-        (${source}, ${config.pullsMint || null}, 'pulls_pack', ${parts.pulls.toString()}::bigint, ${signature}),
         (${source}, ${config.platformWallet || null}, 'platform', ${parts.platform.toString()}::bigint, ${signature})
     `;
     await tx`

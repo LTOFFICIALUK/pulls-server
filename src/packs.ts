@@ -1,6 +1,7 @@
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { createPublicKey, verify } from "node:crypto";
 import bs58 from "bs58";
+import { config } from "./config.js";
 import { asBigint, sql } from "./db.js";
 import { buybackTx, cheapestMachine, generatePack, openPack, packPaid, submitGacha, type OpenedPack } from "./gacha.js";
 import { gradeLabel } from "./grade.js";
@@ -231,6 +232,7 @@ export const openReadyPacks = async () => {
   const coins = await sql<{ mint: string; pack_balance_usdc: string }[]>`
     SELECT mint, pack_balance_usdc FROM coins
     WHERE pack_balance_usdc >= ${price.toString()}::bigint
+      AND mint IS DISTINCT FROM ${config.pullsMint}
     ORDER BY pack_balance_usdc DESC
   `;
   const vault = requireVault();

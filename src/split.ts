@@ -1,13 +1,11 @@
-export const COIN_BPS = 8000n;
-export const PULLS_BPS = 1000n;
+export const COIN_BPS = 9000n;
 export const PLATFORM_BPS = 1000n;
 
 export const splitUsdc = (amount: bigint) => {
   if (amount <= 0n) return { coin: 0n, pulls: 0n, platform: 0n };
   const coin = (amount * COIN_BPS) / 10_000n;
-  const pulls = (amount * PULLS_BPS) / 10_000n;
-  const platform = amount - coin - pulls;
-  return { coin, pulls, platform };
+  const platform = amount - coin;
+  return { coin, pulls: 0n, platform };
 };
 
 export const dollarsToRaw = (dollars: number) => {

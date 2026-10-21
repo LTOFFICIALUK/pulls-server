@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { asBigint, sql } from "./db.js";
 import { cheapestMachine } from "./gacha.js";
 import { dollarsToRaw, nextPackEtaMs, rawToDollars } from "./split.js";
@@ -33,6 +34,7 @@ const coinsSql = async () =>
       (SELECT count(*) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL) AS pulls,
       (SELECT COALESCE(SUM(p.insured_value_usd), 0) FROM packs p WHERE p.mint = c.mint AND p.nft_address IS NOT NULL AND (p.choice IS NULL OR p.choice <> 'cashout')) AS vault_usd
     FROM coins c
+    WHERE c.mint IS DISTINCT FROM ${config.pullsMint}
     ORDER BY c.created_at DESC
   `;
 
@@ -81,6 +83,7 @@ export const listCoins = async () => {
 };
 
 export const getCoin = async (mint: string) => {
+  if (mint === config.pullsMint) return null;
   const [rows, price, pace, pulls] = await Promise.all([
     sql<CoinRow[]>`
       SELECT c.mint, c.name, c.symbol, c.description, c.image_url, c.x_url, c.website_url, c.pack_balance_usdc, c.holder_count, c.created_at,
@@ -142,6 +145,7 @@ const pullQuery = (mint?: string) => {
     FROM packs p
     JOIN coins c ON c.mint = p.mint
     WHERE p.nft_address IS NOT NULL
+      AND c.mint IS DISTINCT FROM ${config.pullsMint}
     ORDER BY p.created_at DESC
     LIMIT 100
   `;
@@ -152,6 +156,7 @@ const pullQuery = (mint?: string) => {
     FROM packs p
     JOIN coins c ON c.mint = p.mint
     WHERE p.nft_address IS NOT NULL AND p.mint = ${mint}
+      AND c.mint IS DISTINCT FROM ${config.pullsMint}
     ORDER BY p.created_at DESC
     LIMIT 100
   `;
@@ -184,6 +189,7 @@ export const listRecords = async () => {
            p.pay_signature, p.open_signature, p.transfer_signature, p.nft_address, p.grade, p.created_at
     FROM packs p
     JOIN coins c ON c.mint = p.mint
+    WHERE c.mint IS DISTINCT FROM ${config.pullsMint}
     ORDER BY p.created_at DESC
     LIMIT 100
   `;
@@ -215,6 +221,7 @@ export const stats = async () => {
         count(*) FILTER (WHERE nft_address IS NOT NULL) AS cards,
         COALESCE(SUM(insured_value_usd) FILTER (WHERE nft_address IS NOT NULL AND (choice IS NULL OR choice <> 'cashout')), 0) AS insured
       FROM packs
+      WHERE mint IS DISTINCT FROM ${config.pullsMint}
     `,
     packPrice(),
   ]);
