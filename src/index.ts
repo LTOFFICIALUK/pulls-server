@@ -156,7 +156,7 @@ app.post("/v1/launch/build", async (req, res) => {
 
 app.post("/v1/launch/submit", async (req, res) => {
   try {
-    const body = z.object({ launchId: z.string().min(4), transactions: z.array(z.string().min(20)).min(1).max(3) }).parse(req.body);
+    const body = z.object({ launchId: z.string().min(4), transactions: z.array(z.string().min(20)).min(1).max(4) }).parse(req.body);
     res.json(await submitLaunch(body.launchId, body.transactions));
   } catch (err) {
     sendError(res, 400, err);

@@ -31,6 +31,16 @@ const online = () => new OnlinePumpSdk(rpc());
 export const curveAddress = (mint: PublicKey) => bondingCurvePda(mint);
 export const poolAddress = (mint: PublicKey) => canonicalPumpPoolPda(mint, CARDS_MINT);
 
+const packTx = (input: { user: PublicKey; mint?: Keypair; blockhash: string; instructions: TransactionInstruction[] }) => {
+  const tx = new Transaction({ feePayer: input.user, recentBlockhash: input.blockhash }).add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+    ...input.instructions,
+  );
+  if (input.mint) tx.partialSign(input.mint);
+  return encodeTx(tx);
+};
+
 export const buildCreate = async (input: {
   mint: Keypair;
   user: PublicKey;
@@ -44,65 +54,58 @@ export const buildCreate = async (input: {
   const resolved = await sdk.resolveQuoteMint(CARDS_MINT).catch(() => null);
   const quoteTokenProgram = resolved?.quoteTokenProgram || TOKEN_PROGRAM_ID;
   const pumpQuote = resolved?.pumpQuote?.accounts;
-  const instructions: TransactionInstruction[] = [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: input.quoteRaw && input.quoteRaw > 0n ? 800_000 : 400_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
-  ];
-  if (input.quoteRaw && input.quoteRaw > 0n) {
-    const [global, feeConfig, quoteControl] = await Promise.all([
-      sdk.fetchGlobal(),
-      sdk.fetchFeeConfig(),
-      sdk.fetchQuoteControl().catch(() => null),
-    ]);
-    const quoteAmount = new BN(input.quoteRaw.toString());
-    const amount = getBuyTokenAmountFromSolAmount({
-      global,
-      feeConfig,
-      mintSupply: null,
-      bondingCurve: null,
-      amount: quoteAmount,
-      quoteMint: CARDS_MINT,
-      quoteControl,
-      ...(resolved?.pumpQuote ? { pumpQuote: resolved.pumpQuote.curve } : {}),
-    });
-    if (amount.lten(0)) throw new Error("This dev buy is too small to buy the coin.");
-    instructions.push(
-      ...(await PUMP_SDK.createV2AndBuyV2Instructions({
-        global,
-        mint: input.mint.publicKey,
-        name: input.name,
-        symbol: input.symbol,
-        uri: input.uri,
-        creator: input.creator,
-        user: input.user,
-        amount,
-        quoteAmount,
-        mayhemMode: false,
-        quoteMint: CARDS_MINT,
-        quoteTokenProgram,
-        ...(pumpQuote ? { pumpQuote } : {}),
-      })),
-    );
-  } else {
-    instructions.push(
-      await PUMP_SDK.createV2Instruction({
-        mint: input.mint.publicKey,
-        name: input.name,
-        symbol: input.symbol,
-        uri: input.uri,
-        creator: input.creator,
-        user: input.user,
-        mayhemMode: false,
-        quoteMint: CARDS_MINT,
-        quoteTokenProgram,
-        ...(pumpQuote ? { pumpQuote } : {}),
-      }),
-    );
-  }
   const { blockhash } = await rpc().getLatestBlockhash("confirmed");
-  const tx = new Transaction({ feePayer: input.user, recentBlockhash: blockhash }).add(...instructions);
-  tx.partialSign(input.mint);
-  return encodeTx(tx);
+  const createIx = await PUMP_SDK.createV2Instruction({
+    mint: input.mint.publicKey,
+    name: input.name,
+    symbol: input.symbol,
+    uri: input.uri,
+    creator: input.creator,
+    user: input.user,
+    mayhemMode: false,
+    quoteMint: CARDS_MINT,
+    quoteTokenProgram,
+    ...(pumpQuote ? { pumpQuote } : {}),
+  });
+  const create = packTx({ user: input.user, mint: input.mint, blockhash, instructions: [createIx] });
+  if (!input.quoteRaw || input.quoteRaw <= 0n) return { create, buy: null };
+
+  const [global, feeConfig, quoteControl] = await Promise.all([
+    sdk.fetchGlobal(),
+    sdk.fetchFeeConfig(),
+    sdk.fetchQuoteControl().catch(() => null),
+  ]);
+  const quoteAmount = new BN(input.quoteRaw.toString());
+  const amount = getBuyTokenAmountFromSolAmount({
+    global,
+    feeConfig,
+    mintSupply: null,
+    bondingCurve: null,
+    amount: quoteAmount,
+    quoteMint: CARDS_MINT,
+    quoteControl,
+    ...(resolved?.pumpQuote ? { pumpQuote: resolved.pumpQuote.curve } : {}),
+  });
+  if (amount.lten(0)) throw new Error("This dev buy is too small to buy the coin.");
+  const combined = await PUMP_SDK.createV2AndBuyV2Instructions({
+    global,
+    mint: input.mint.publicKey,
+    name: input.name,
+    symbol: input.symbol,
+    uri: input.uri,
+    creator: input.creator,
+    user: input.user,
+    amount,
+    quoteAmount,
+    mayhemMode: false,
+    quoteMint: CARDS_MINT,
+    quoteTokenProgram,
+    ...(pumpQuote ? { pumpQuote } : {}),
+  });
+  const buyIxs = combined.slice(1);
+  if (!buyIxs.length) throw new Error("The dev buy could not be built.");
+  const buy = packTx({ user: input.user, blockhash, instructions: buyIxs });
+  return { create, buy };
 };
 
 export const claimCoinFees = async (mint: PublicKey, creator: Keypair) => {

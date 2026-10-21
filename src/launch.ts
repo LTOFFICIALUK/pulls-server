@@ -132,7 +132,7 @@ export const buildLaunch = async (raw: unknown) => {
   const metadataUri = ipfs || hostedUri;
   if (metadataUri.length > 200) throw new Error("The metadata address is too long for pump.fun.");
 
-  const transactions: { kind: "swap" | "create"; tx: string }[] = [];
+  const transactions: { kind: "swap" | "create" | "buy"; tx: string }[] = [];
   let quoteRaw = 0n;
   if (input.devBuySol > 0) {
     const lamports = BigInt(Math.round(input.devBuySol * 1_000_000_000));
@@ -147,18 +147,17 @@ export const buildLaunch = async (raw: unknown) => {
     transactions.push({ kind: "swap", tx: await swapTransaction(quote, wallet.toBase58()) });
   }
   const creator = await allocateCreator();
-  transactions.push({
-    kind: "create",
-    tx: await buildCreate({
-      mint,
-      user: wallet,
-      creator: creator.publicKey,
-      name: input.name,
-      symbol,
-      uri: metadataUri,
-      quoteRaw,
-    }),
+  const built = await buildCreate({
+    mint,
+    user: wallet,
+    creator: creator.publicKey,
+    name: input.name,
+    symbol,
+    uri: metadataUri,
+    quoteRaw,
   });
+  transactions.push({ kind: "create", tx: built.create });
+  if (built.buy) transactions.push({ kind: "buy", tx: built.buy });
 
   await sql`
     INSERT INTO launches (id, wallet, mint, name, symbol, description, x_url, website_url, image_id, metadata_uri, dev_buy_sol, creator, creator_index, transactions)
