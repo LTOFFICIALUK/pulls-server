@@ -2,25 +2,28 @@ import { PublicKey } from "@solana/web3.js";
 import { config } from "./config.js";
 import { asBigint, sql } from "./db.js";
 import { CARDS_MINT, USDC_MINT, tokenBalance, transferUsdc, vaultSwap } from "./jupiter.js";
-import { requireVault, vaultKeypair } from "./keys.js";
+import { platformKeypair, requireVault, vaultKeypair } from "./keys.js";
 import { claimCards } from "./pump.js";
 import { splitUsdc } from "./split.js";
 
 export const ensurePullsCoin = async () => {
-  const vault = vaultKeypair();
-  if (!vault || !config.pullsMint) return;
+  if (!config.pullsMint || !config.platformWallet) return;
   await sql`
     INSERT INTO coins (mint, name, symbol, description, launcher, creator, source)
     VALUES (
       ${config.pullsMint},
       'Pulls',
       'PULLS',
-      'The Pulls coin. Holder fees rip graded packs.',
-      'proxima',
-      ${vault.publicKey.toBase58()},
+      'The Pulls coin. Ten percent of every other coin tops up packs for holders.',
+      ${config.platformWallet},
+      ${config.platformWallet},
       'proxima'
     )
-    ON CONFLICT (mint) DO NOTHING
+    ON CONFLICT (mint) DO UPDATE
+    SET creator = EXCLUDED.creator,
+        launcher = EXCLUDED.launcher,
+        description = EXCLUDED.description,
+        updated_at = now()
   `;
   const moved = await sql<{ pack_balance_usdc: string }[]>`
     UPDATE coins
@@ -95,19 +98,43 @@ export const flushPlatform = async () => {
   `;
 };
 
+const claimPullsForPlatform = async () => {
+  const signer = platformKeypair();
+  if (!signer || !config.pullsMint) return;
+  const before = await tokenBalance(signer.publicKey, CARDS_MINT);
+  let signature: string | null = null;
+  try {
+    signature = await claimCards(new PublicKey(config.pullsMint), signer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "claim";
+    if (!/insufficient|no record|0x0|empty|debit/i.test(message)) console.error("claim", "PULLS", message);
+  }
+  const after = await tokenBalance(signer.publicKey, CARDS_MINT);
+  const gained = after > before ? after - before : 0n;
+  if (gained <= 0n) return;
+  const claimSignature = signature || `platform-${config.pullsMint}-${after.toString()}`;
+  await sql`
+    INSERT INTO fee_claims (mint, cards_raw, signature)
+    VALUES (${config.pullsMint}, ${gained.toString()}::bigint, ${claimSignature})
+    ON CONFLICT (signature) DO NOTHING
+  `;
+};
+
 export const claimAndSwap = async () => {
-  if (!vaultKeypair()) return;
   await ensurePullsCoin();
+  await claimPullsForPlatform();
+  if (!vaultKeypair()) return;
   const vault = requireVault();
   const coins = await sql<{ mint: string; symbol: string; cards_pending: string }[]>`
     SELECT mint, symbol, cards_pending FROM coins ORDER BY created_at ASC
   `;
   for (const coin of coins) {
+    if (coin.mint === config.pullsMint) continue;
     const mint = new PublicKey(coin.mint);
     const before = await tokenBalance(vault.publicKey, CARDS_MINT);
     let signature: string | null = null;
     try {
-      signature = await claimCards(mint);
+      signature = await claimCards(mint, vault);
     } catch (err) {
       const message = err instanceof Error ? err.message : "claim";
       if (!/insufficient|no record|0x0|empty|debit/i.test(message)) {

@@ -60,6 +60,7 @@ app.get("/v1/ready", (_req, res) => {
     helius: Boolean(config.heliusRpc),
     pullsMint: Boolean(config.pullsMint),
     platform: Boolean(config.platformWallet),
+    platformSigner: Boolean(config.platformSecret),
   });
 });
 

@@ -12,3 +12,12 @@ export const requireVault = () => {
   if (!key) throw new Error("The vault is not configured yet.");
   return key;
 };
+
+export const platformKeypair = () => {
+  if (!config.platformSecret) return null;
+  const key = Keypair.fromSecretKey(bs58.decode(config.platformSecret));
+  if (config.platformWallet && key.publicKey.toBase58() !== config.platformWallet) {
+    throw new Error("The platform key does not match the platform wallet.");
+  }
+  return key;
+};

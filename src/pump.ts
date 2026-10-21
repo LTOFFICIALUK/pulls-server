@@ -101,39 +101,39 @@ export const buildCreate = async (input: {
   return encodeTx(tx);
 };
 
-export const claimCards = async (mint: PublicKey) => {
-  const vault = requireVault();
+export const claimCards = async (mint: PublicKey, signer: Keypair) => {
   const sdk = online();
   const connection = rpc();
-  const ata = getAssociatedTokenAddressSync(CARDS_MINT, vault.publicKey, true, TOKEN_PROGRAM_ID);
+  const owner = signer.publicKey;
+  const ata = getAssociatedTokenAddressSync(CARDS_MINT, owner, true, TOKEN_PROGRAM_ID);
   const signatures: string[] = [];
   const send = async (instructions: TransactionInstruction[]) => {
     if (!instructions.length) return;
     const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ...instructions);
-    signatures.push(await signAndSend(tx, [vault]));
+    signatures.push(await signAndSend(tx, [signer]));
   };
   const sweep = await PUMP_SDK.sweepCreatorFeeInstruction({
-    payer: vault.publicKey,
+    payer: owner,
     mint,
-    creator: vault.publicKey,
+    creator: owner,
     quoteMint: CARDS_MINT,
     quoteTokenProgram: TOKEN_PROGRAM_ID,
   });
   await send([
-    createAssociatedTokenAccountIdempotentInstruction(vault.publicKey, ata, vault.publicKey, CARDS_MINT, TOKEN_PROGRAM_ID),
+    createAssociatedTokenAccountIdempotentInstruction(owner, ata, owner, CARDS_MINT, TOKEN_PROGRAM_ID),
     sweep,
   ]).catch(() => undefined);
   const pool = poolAddress(mint);
   if (await connection.getAccountInfo(pool)) {
     const poolSweep = await PUMP_SDK.sweepPoolCreatorFeeInstruction({
-      payer: vault.publicKey,
+      payer: owner,
       mint,
-      coinCreator: vault.publicKey,
+      coinCreator: owner,
       quoteMint: CARDS_MINT,
       quoteTokenProgram: TOKEN_PROGRAM_ID,
     });
     await send([poolSweep]).catch(() => undefined);
   }
-  await send(await sdk.collectCoinCreatorFeeV2Instructions(vault.publicKey, CARDS_MINT, TOKEN_PROGRAM_ID, vault.publicKey));
+  await send(await sdk.collectCoinCreatorFeeV2Instructions(owner, CARDS_MINT, TOKEN_PROGRAM_ID, owner));
   return signatures.at(-1) || null;
 };

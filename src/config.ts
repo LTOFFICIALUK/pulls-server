@@ -15,6 +15,9 @@ const heliusRpc = () => {
   return "";
 };
 
+export const PULLS_MINT_ADDRESS = "CVxBbgYaGpLxCX8j5eFtaR34WStUFcxDGLQ8EKhPULLS";
+export const PLATFORM_WALLET_ADDRESS = "96kZtx5Vkn6KkXLG4WDUF3EsDAR9CxGzhAKdXEMPULLS";
+
 const port = Number(process.env.PORT || 8080);
 const railwayPublic = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN.replace(/^https?:\/\//, "")}`
@@ -30,8 +33,9 @@ export const config = {
     .filter(Boolean),
   heliusRpc: heliusRpc(),
   vaultSecret: raw(process.env.VAULT_SECRET_KEY),
-  platformWallet: raw(process.env.PLATFORM_WALLET),
-  pullsMint: raw(process.env.PULLS_MINT || process.env.PULL_MINT),
+  platformSecret: raw(process.env.PLATFORM_SECRET_KEY),
+  platformWallet: raw(process.env.PLATFORM_WALLET || PLATFORM_WALLET_ADDRESS),
+  pullsMint: raw(process.env.PULLS_MINT || process.env.PULL_MINT || PULLS_MINT_ADDRESS),
   ccApiKey: raw(process.env.CC_API_KEY),
   jupiterApi: withScheme(raw(process.env.JUPITER_API || "lite-api.jup.ag")).replace(/\/+$/, ""),
   gachaApi: "https://gacha.collectorcrypt.com",
